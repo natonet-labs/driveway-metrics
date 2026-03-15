@@ -36,16 +36,16 @@ export default {
           return new Response('Missing key/value', { status: 400, headers: corsHeaders });
         }
 
-        // Write (or overwrite) the daily total — e.g. driveway:2026-03-15
+        // Write daily total
         await env.DRIVEWAY_METRICS.put(key, JSON.stringify(value));
 
-        // Also write an hourly snapshot keyed by hour — e.g. hourly:2026-03-15:14
-        // Uses the Pi's reported date from the payload so timezone matches the device
+        // Write hourly snapshot using the Pi's local hour from the payload
         const date: string = value.date || key.split(':')[1];
-        const hour: string = new Date().toISOString().slice(11, 13); // "00".."23" UTC
-        const hourlyKey = `hourly:${date}:${hour}`;
+        const hour: number = value.hour ?? new Date().getUTCHours(); // fallback to UTC if missing
+        const hourStr: string = String(hour).padStart(2, '0');
+        const hourlyKey = `hourly:${date}:${hourStr}`;
         await env.DRIVEWAY_METRICS.put(hourlyKey, JSON.stringify({
-          hour: parseInt(hour, 10),
+          hour: hour,
           entries: value.entries || 0,
           exits: value.exits || 0,
         }), { expirationTtl: 60 * 60 * 48 }); // Auto-expire hourly keys after 48h
