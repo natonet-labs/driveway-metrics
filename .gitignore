@@ -165,3 +165,9 @@ dist
 .env*
 !.env.example
 .wrangler/
+
+# Mac system files
+.DS_Store
+
+# Zip files
+**/*.zip
