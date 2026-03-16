@@ -36,19 +36,26 @@ export default {
           return new Response('Missing key/value', { status: 400, headers: corsHeaders });
         }
 
-        // Write daily total
-        await env.DRIVEWAY_METRICS.put(key, JSON.stringify(value));
+        // Only overwrite the daily key if the new count is higher (guards against
+        // a restarted service briefly reporting lower counts before catching up)
+        const existing: any = await env.DRIVEWAY_METRICS.get(key, { type: 'json' });
+        if (
+          !existing ||
+          value.entries >= (existing.entries || 0) ||
+          value.exits >= (existing.exits || 0)
+        ) {
+          await env.DRIVEWAY_METRICS.put(key, JSON.stringify(value));
+        }
 
-        // Write hourly snapshot using the Pi's local hour from the payload
+        // Hourly snapshot keyed by Pi local hour
         const date: string = value.date || key.split(':')[1];
-        const hour: number = value.hour ?? new Date().getUTCHours(); // fallback to UTC if missing
+        const hour: number = value.hour ?? new Date().getUTCHours();
         const hourStr: string = String(hour).padStart(2, '0');
-        const hourlyKey = `hourly:${date}:${hourStr}`;
-        await env.DRIVEWAY_METRICS.put(hourlyKey, JSON.stringify({
-          hour: hour,
-          entries: value.entries || 0,
-          exits: value.exits || 0,
-        }), { expirationTtl: 60 * 60 * 48 }); // Auto-expire hourly keys after 48h
+        await env.DRIVEWAY_METRICS.put(
+          `hourly:${date}:${hourStr}`,
+          JSON.stringify({ hour, entries: value.entries || 0, exits: value.exits || 0 }),
+          { expirationTtl: 60 * 60 * 48 }
+        );
 
         return new Response('Metrics stored OK', { status: 200, headers: corsHeaders });
       } catch (e) {
@@ -93,17 +100,37 @@ export default {
     // GET /dashboard — last 30 days (daily totals only)
     if (url.pathname === '/dashboard') {
       const list = await env.DRIVEWAY_METRICS.list({ limit: 30, prefix: 'driveway:' });
+
       const metrics = await Promise.all(
         list.keys.map(async (k: KVNamespaceListKey) => {
-          const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
-          return {
-            date: k.name.split(':')[1],
-            entries: v?.entries || 0,
-            exits: v?.exits || 0,
-          };
+          const date = k.name.split(':')[1];
+
+          // Find the peak hourly snapshot for this date — that represents
+          // the highest cumulative count reached during the day
+          const hourlyList = await env.DRIVEWAY_METRICS.list({ prefix: `hourly:${date}:` });
+          let maxEntries = 0;
+          let maxExits = 0;
+
+          if (hourlyList.keys.length > 0) {
+            const snapshots = await Promise.all(
+              hourlyList.keys.map(async (hk: KVNamespaceListKey) => {
+                const v: any = await env.DRIVEWAY_METRICS.get(hk.name, { type: 'json' });
+                return { entries: v?.entries || 0, exits: v?.exits || 0 };
+              })
+            );
+            maxEntries = Math.max(...snapshots.map(s => s.entries));
+            maxExits = Math.max(...snapshots.map(s => s.exits));
+          } else {
+            // Fall back to the daily key for older dates before hourly tracking existed
+            const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
+            maxEntries = v?.entries || 0;
+            maxExits = v?.exits || 0;
+          }
+
+          return { date, entries: maxEntries, exits: maxExits };
         })
       );
-      // KV list returns oldest first — reverse for newest-first display
+
       return Response.json(metrics.reverse(), { headers: corsHeaders });
     }
 
