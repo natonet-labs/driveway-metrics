@@ -58,10 +58,11 @@ export default {
 
     // GET /today — latest daily totals
     if (url.pathname === '/today') {
-      const today = new Date().toISOString().split('T')[0];
-      const data: any = await env.DRIVEWAY_METRICS.get(`driveway:${today}`, { type: 'json' });
+      // Use date from query param (browser local date) or fall back to UTC
+      const date = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
+      const data: any = await env.DRIVEWAY_METRICS.get(`driveway:${date}`, { type: 'json' });
       return Response.json({
-        date: today,
+        date,
         entries: data?.entries || 0,
         exits: data?.exits || 0,
       }, { headers: corsHeaders });
