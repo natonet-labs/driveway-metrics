@@ -70,8 +70,8 @@ export default {
 
     // GET /hourly — today's intraday snapshots sorted by hour
     if (url.pathname === '/hourly') {
-      const today = new Date().toISOString().split('T')[0];
-      const list = await env.DRIVEWAY_METRICS.list({ prefix: `hourly:${today}:` });
+      const date = url.searchParams.get('date') || new Date().toISOString().split('T')[0];
+      const list = await env.DRIVEWAY_METRICS.list({ prefix: `hourly:${date}:` })
 
       const snapshots = await Promise.all(
         list.keys.map(async (k: KVNamespaceListKey) => {
@@ -87,7 +87,7 @@ export default {
       // Sort ascending by hour so the chart reads left→right
       snapshots.sort((a, b) => a.hour - b.hour);
 
-      return Response.json({ date: today, snapshots }, { headers: corsHeaders });
+      return Response.json({ date, snapshots }, { headers: corsHeaders });
     }
 
     // GET /dashboard — last 30 days (daily totals only)
