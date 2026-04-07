@@ -324,8 +324,9 @@
     }
 
     load();
-    // Refresh every 5 minutes — hourly data only changes once per hour anyway
-    setInterval(load, 5 * 60 * 1000);
+    // Refresh every 15 minutes — the Worker cache busts immediately on Pi upload,
+    // so the dashboard updates within seconds of a new sync regardless of this interval.
+    setInterval(load, 15 * 60 * 1000);
   </script>
 </body>
 
