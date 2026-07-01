@@ -106,9 +106,13 @@ async function computeHourly(
 async function computeDashboard(
   env: Env,
 ): Promise<{ date: string; entries: number; exits: number }[]> {
-  const list = await env.DRIVEWAY_METRICS.list({ limit: 30, prefix: 'driveway:' });
+  // KV list returns keys in ascending lexicographic order (= chronological for
+  // date keys). We must NOT use limit:30 here — that would return the 30 OLDEST
+  // days. Instead list all and slice the last 30 to get the most recent 30.
+  const list = await env.DRIVEWAY_METRICS.list({ prefix: 'driveway:' });
+  const keys = list.keys.slice(-30);
   const metrics = await Promise.all(
-    list.keys.map(async (k: KVNamespaceListKey) => {
+    keys.map(async (k: KVNamespaceListKey) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
       return {
         date: k.name.split(':')[1],
@@ -117,8 +121,8 @@ async function computeDashboard(
       };
     }),
   );
-  // KV list returns alphabetical (oldest first for date keys); reverse for
-  // newest-first ordering expected by the dashboard JS.
+  // Already ascending from KV; reverse for newest-first ordering expected by
+  // the dashboard JS (which reverses again to render oldest→newest on the chart).
   return metrics.reverse();
 }
 
