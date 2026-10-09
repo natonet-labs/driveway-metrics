@@ -4,6 +4,10 @@
 // GET  /hourly       — today's intraday snapshots     (cached 5 min in KV)
 // GET  /dashboard    — last 30 days                   (cached 10 min in KV)
 //
+// Auth: POST needs `Bearer CLOUDFLARE_TOKEN` (the Pi's secret); the GET
+// endpoints need `Bearer DASHBOARD_TOKEN`. Separate secrets so the read-only
+// dashboard key can't be used to write data.
+//
 // KV operation budget (free tier: 100k reads, 1k writes, 1k lists per day)
 // -------------------------------------------------------------------------
 // Before caching: every dashboard page load = 2 lists + up to 55 reads.
@@ -22,6 +26,8 @@
 
 export interface Env {
   DRIVEWAY_METRICS: KVNamespace;
+  CLOUDFLARE_TOKEN: string; // Worker secret shared with the Pi (wrangler secret put)
+  DASHBOARD_TOKEN: string;  // Worker secret for the read-only dashboard endpoints
 }
 
 const corsHeaders = {
@@ -66,6 +72,20 @@ async function cachedResponse(
 }
 
 // ---------------------------------------------------------------------------
+// isAuthorized — constant-time compare of the Bearer token against a secret
+// Fails closed if the secret is not configured.
+// ---------------------------------------------------------------------------
+function isAuthorized(request: Request, secret: string): boolean {
+  const header = request.headers.get('Authorization') ?? '';
+  if (!secret || !header.startsWith('Bearer ')) return false;
+  const encoder = new TextEncoder();
+  const given = encoder.encode(header.slice('Bearer '.length));
+  const expected = encoder.encode(secret);
+  if (given.byteLength !== expected.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(given, expected);
+}
+
+// ---------------------------------------------------------------------------
 // invalidateCaches — called after every Pi write so next load is fresh
 // Costs 2 deletes (free tier: deletes count as writes, but 24/day is trivial)
 // ---------------------------------------------------------------------------
@@ -86,7 +106,7 @@ async function computeHourly(
 ): Promise<{ date: string; snapshots: { hour: number; entries: number; exits: number }[] }> {
   const list = await env.DRIVEWAY_METRICS.list({ prefix: `hourly:${date}:` });
   const snapshots = await Promise.all(
-    list.keys.map(async (k: KVNamespaceListKey) => {
+    list.keys.map(async (k: KVNamespaceListKey<unknown>) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
       return {
         hour: v?.hour ?? parseInt(k.name.split(':')[3], 10),
@@ -112,7 +132,7 @@ async function computeDashboard(
   const list = await env.DRIVEWAY_METRICS.list({ prefix: 'driveway:' });
   const keys = list.keys.slice(-30);
   const metrics = await Promise.all(
-    keys.map(async (k: KVNamespaceListKey) => {
+    keys.map(async (k: KVNamespaceListKey<unknown>) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
       return {
         date: k.name.split(':')[1],
@@ -142,8 +162,7 @@ export default {
     // Writes: 1 conditional daily key + 1 hourly key + 2 cache deletes
     // ------------------------------------------------------------------
     if (request.method === 'POST' && url.pathname === '/api/metrics') {
-      const token = request.headers.get('Authorization')?.replace('Bearer ', '');
-      if (!token) {
+      if (!isAuthorized(request, env.CLOUDFLARE_TOKEN)) {
         return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
 
@@ -185,6 +204,14 @@ export default {
       } catch (_e) {
         return new Response('JSON parse error', { status: 400, headers: corsHeaders });
       }
+    }
+
+    // ------------------------------------------------------------------
+    // Read endpoints below require the dashboard token
+    // ------------------------------------------------------------------
+    const isReadEndpoint = ['/today', '/hourly', '/dashboard'].includes(url.pathname);
+    if (isReadEndpoint && !isAuthorized(request, env.DASHBOARD_TOKEN)) {
+      return new Response('Unauthorized', { status: 401, headers: corsHeaders });
     }
 
     // ------------------------------------------------------------------
