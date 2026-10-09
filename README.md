@@ -9,6 +9,8 @@ Cloudflare Worker backend for [driveway-counter](https://github.com/natonet-labs
 
 ## Dashboard
 
+![Driveway Counter dashboard: today's entry and exit totals, hourly activity, and 30-day history](driveway-metrics.png)
+
 `src/index.html` is a static page (hosted on Cloudflare Pages) that reads from the Worker. It has three views:
 
 | View | Description |
