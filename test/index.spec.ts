@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import worker, { type Env } from '../src/index';
 
 const TOKEN = 'test-token';
-const testEnv: Env = { ...(env as unknown as Env), CLOUDFLARE_TOKEN: TOKEN };
+const DASHBOARD_TOKEN = 'dashboard-token';
+const testEnv: Env = { ...(env as unknown as Env), CLOUDFLARE_TOKEN: TOKEN, DASHBOARD_TOKEN };
 
 function upload(value: object, token: string | null = TOKEN): Promise<Response> {
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -16,7 +17,11 @@ function upload(value: object, token: string | null = TOKEN): Promise<Response> 
 	return worker.fetch(request, testEnv);
 }
 
-const get = (path: string) => worker.fetch(new Request(`https://metrics.test${path}`), testEnv);
+const get = (path: string, token: string | null = DASHBOARD_TOKEN, e: Env = testEnv) =>
+	worker.fetch(
+		new Request(`https://metrics.test${path}`, token === null ? {} : { headers: { Authorization: `Bearer ${token}` } }),
+		e,
+	);
 
 describe('POST /api/metrics', () => {
 	beforeEach(async () => {
@@ -81,6 +86,19 @@ describe('read endpoints', () => {
 		const afterUpload = await get('/dashboard');
 		expect(afterUpload.headers.get('X-Cache')).toBe('MISS');
 		expect(((await afterUpload.json()) as unknown[]).length).toBe(3);
+	});
+
+	it.each(['/today', '/hourly', '/dashboard'])('rejects %s without the dashboard token', async (path) => {
+		expect((await get(path, null)).status).toBe(401);
+		expect((await get(path, 'wrong')).status).toBe(401);
+	});
+
+	it('does not accept the ingest token for reads', async () => {
+		expect((await get('/today', TOKEN)).status).toBe(401);
+	});
+
+	it('rejects reads when DASHBOARD_TOKEN is not configured', async () => {
+		expect((await get('/today', '', { ...testEnv, DASHBOARD_TOKEN: '' })).status).toBe(401);
 	});
 
 	it('returns 404 for unknown paths', async () => {

@@ -151,6 +151,32 @@
 
   <script>
     var API = 'https://driveway-metrics.natonet.workers.dev';
+    var TOKEN_KEY = 'drivewayDashboardToken';
+
+    // The Worker's read endpoints require the DASHBOARD_TOKEN secret. Ask for
+    // it once and keep it in this browser; nothing secret lives in this file.
+    function getToken() {
+      var token = localStorage.getItem(TOKEN_KEY);
+      if (!token) {
+        token = (window.prompt('Dashboard access key:') || '').trim();
+        if (token) localStorage.setItem(TOKEN_KEY, token);
+      }
+      return token;
+    }
+
+    function apiGet(path) {
+      return fetch(API + path, {
+        headers: { Authorization: 'Bearer ' + getToken() },
+      }).then(function (r) {
+        if (r.status === 401) {
+          localStorage.removeItem(TOKEN_KEY);
+          document.getElementById('last-updated').textContent =
+            'Access key missing or invalid. Reload the page to enter it again.';
+          throw new Error('unauthorized');
+        }
+        return r.json();
+      });
+    }
     var hourlyChart = null;
     var dailyChart = null;
 
@@ -295,20 +321,19 @@
       var today = localDate();
 
       // Today's totals → update cards
-      fetch(API + '/today?date=' + today)
-        .then(function (r) { return r.json(); })
+      apiGet('/today?date=' + today)
         .then(function (d) {
           setCards(d.date, d.entries, d.exits);
           document.getElementById('last-updated').textContent =
             'Last updated: ' + new Date().toLocaleTimeString();
         })
-        .catch(function () {
+        .catch(function (e) {
+          if (e.message === 'unauthorized') return;
           document.getElementById('last-updated').textContent = 'Could not reach API';
         });
 
       // Hourly snapshots → intraday bar chart
-      fetch(API + '/hourly?date=' + today)
-        .then(function (r) { return r.json(); })
+      apiGet('/hourly?date=' + today)
         .then(function (d) {
           renderHourly(d.date, d.snapshots);
         })
@@ -317,8 +342,7 @@
         });
 
       // 30-day history → daily line chart (unchanged)
-      fetch(API + '/dashboard')
-        .then(function (r) { return r.json(); })
+      apiGet('/dashboard')
         .then(function (d) { renderDaily(d); })
         .catch(function () { renderDaily([]); });
     }
