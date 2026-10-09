@@ -21,6 +21,7 @@
 //   /today:          288 reads
 //   /hourly hits:    276 reads  |  misses: 12 × (1 list + 24 reads + 1 write) = 312 ops
 //   /dashboard hits: 282 reads  |  misses:  6 × (1 list + 30 reads + 1 write) = 192 ops
+//                    (+1 list per miss for every further 1,000 days of history)
 //   Pi uploads:      24 writes + 24 hourly keys + 24×2 cache deletes = 96 writes
 //   Total:           ~1,350 ops/day  (vs. ~55,000/day before caching)
 
@@ -121,16 +122,23 @@ async function computeHourly(
 
 // ---------------------------------------------------------------------------
 // computeDashboard — called only on cache miss
-// Cost: 1 list + N reads (N = days with data, max 30)
+// Cost: ⌈days of history / 1,000⌉ lists + N reads (N = days with data, max 30)
 // ---------------------------------------------------------------------------
 async function computeDashboard(
   env: Env,
 ): Promise<{ date: string; entries: number; exits: number }[]> {
   // KV list returns keys in ascending lexicographic order (= chronological for
-  // date keys). We must NOT use limit:30 here — that would return the 30 OLDEST
-  // days. Instead list all and slice the last 30 to get the most recent 30.
-  const list = await env.DRIVEWAY_METRICS.list({ prefix: 'driveway:' });
-  const keys = list.keys.slice(-30);
+  // date keys), at most 1,000 per call. We must NOT use limit:30 — that would
+  // return the 30 OLDEST days — and one call isn't enough either: past 1,000
+  // days it would stop short of the newest. So follow the cursor through every
+  // page, keeping only the trailing 30 keys so memory stays flat.
+  let keys: KVNamespaceListKey<unknown>[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.DRIVEWAY_METRICS.list({ prefix: 'driveway:', cursor });
+    keys = keys.concat(page.keys).slice(-30);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
   const metrics = await Promise.all(
     keys.map(async (k: KVNamespaceListKey<unknown>) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
