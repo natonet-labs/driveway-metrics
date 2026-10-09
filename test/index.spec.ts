@@ -1,41 +1,89 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
-import worker from '../src';
+import { env } from 'cloudflare:test';
+import { beforeEach, describe, expect, it } from 'vitest';
+import worker, { type Env } from '../src/index';
 
-describe('Hello World user worker', () => {
-	describe('request for /message', () => {
-		it('/ responds with "Hello, World!" (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>('http://example.com/message');
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
+const TOKEN = 'test-token';
+const testEnv: Env = { ...(env as unknown as Env), CLOUDFLARE_TOKEN: TOKEN };
 
-		it('responds with "Hello, World!" (integration style)', async () => {
-			const request = new Request('http://example.com/message');
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatchInlineSnapshot(`"Hello, World!"`);
-		});
+function upload(value: object, token: string | null = TOKEN): Promise<Response> {
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	if (token !== null) headers.Authorization = `Bearer ${token}`;
+	const request = new Request('https://metrics.test/api/metrics', {
+		method: 'POST',
+		headers,
+		body: JSON.stringify({ key: `driveway:${(value as { date: string }).date}`, value }),
+	});
+	return worker.fetch(request, testEnv);
+}
+
+const get = (path: string) => worker.fetch(new Request(`https://metrics.test${path}`), testEnv);
+
+describe('POST /api/metrics', () => {
+	beforeEach(async () => {
+		const { keys } = await testEnv.DRIVEWAY_METRICS.list();
+		await Promise.all(keys.map((k) => testEnv.DRIVEWAY_METRICS.delete(k.name)));
 	});
 
-	describe('request for /random', () => {
-		it('/ responds with a random UUID (unit style)', async () => {
-			const request = new Request<unknown, IncomingRequestCfProperties>('http://example.com/random');
-			// Create an empty context to pass to `worker.fetch()`.
-			const ctx = createExecutionContext();
-			const response = await worker.fetch(request, env, ctx);
-			// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-			await waitOnExecutionContext(ctx);
-			expect(await response.text()).toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/);
-		});
+	it('rejects uploads with no token', async () => {
+		expect((await upload({ date: '2026-10-01', entries: 1, exits: 0 }, null)).status).toBe(401);
+	});
 
-		it('responds with a random UUID (integration style)', async () => {
-			const request = new Request('http://example.com/random');
-			const response = await SELF.fetch(request);
-			expect(await response.text()).toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/);
+	it('rejects uploads with the wrong token', async () => {
+		expect((await upload({ date: '2026-10-01', entries: 1, exits: 0 }, 'wrong')).status).toBe(401);
+		expect(await testEnv.DRIVEWAY_METRICS.get('driveway:2026-10-01')).toBeNull();
+	});
+
+	it('rejects uploads when the secret is not configured', async () => {
+		const request = new Request('https://metrics.test/api/metrics', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer ' },
+			body: JSON.stringify({ key: 'driveway:2026-10-01', value: { date: '2026-10-01' } }),
 		});
+		const response = await worker.fetch(request, { ...testEnv, CLOUDFLARE_TOKEN: '' });
+		expect(response.status).toBe(401);
+	});
+
+	it('stores an authorized upload and serves it from /today', async () => {
+		expect((await upload({ date: '2026-10-01', hour: 9, entries: 4, exits: 3 })).status).toBe(200);
+		expect(await (await get('/today?date=2026-10-01')).json()).toEqual({ date: '2026-10-01', entries: 4, exits: 3 });
+	});
+
+	it('does not let a lower post-restart count clobber the daily total', async () => {
+		await upload({ date: '2026-10-01', hour: 9, entries: 4, exits: 3 });
+		await upload({ date: '2026-10-01', hour: 10, entries: 0, exits: 0 });
+		expect(await (await get('/today?date=2026-10-01')).json()).toMatchObject({ entries: 4, exits: 3 });
+	});
+});
+
+describe('read endpoints', () => {
+	beforeEach(async () => {
+		const { keys } = await testEnv.DRIVEWAY_METRICS.list();
+		await Promise.all(keys.map((k) => testEnv.DRIVEWAY_METRICS.delete(k.name)));
+	});
+
+	it('returns /hourly snapshots in hour order', async () => {
+		await upload({ date: '2026-10-01', hour: 14, entries: 6, exits: 5 });
+		await upload({ date: '2026-10-01', hour: 9, entries: 2, exits: 1 });
+		const body = (await (await get('/hourly?date=2026-10-01')).json()) as { snapshots: { hour: number }[] };
+		expect(body.snapshots.map((s) => s.hour)).toEqual([9, 14]);
+	});
+
+	it('returns /dashboard newest-first and caches until the next upload', async () => {
+		await upload({ date: '2026-10-01', entries: 1, exits: 1 });
+		await upload({ date: '2026-10-02', entries: 2, exits: 2 });
+
+		const first = await get('/dashboard');
+		expect(first.headers.get('X-Cache')).toBe('MISS');
+		expect(((await first.json()) as { date: string }[]).map((d) => d.date)).toEqual(['2026-10-02', '2026-10-01']);
+		expect((await get('/dashboard')).headers.get('X-Cache')).toBe('HIT');
+
+		await upload({ date: '2026-10-03', entries: 3, exits: 3 });
+		const afterUpload = await get('/dashboard');
+		expect(afterUpload.headers.get('X-Cache')).toBe('MISS');
+		expect(((await afterUpload.json()) as unknown[]).length).toBe(3);
+	});
+
+	it('returns 404 for unknown paths', async () => {
+		expect((await get('/nope')).status).toBe(404);
 	});
 });

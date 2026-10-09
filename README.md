@@ -3,7 +3,7 @@
 
 # Driveway Metrics
 
-Cloudflare Worker backend for driveway-counter *(private)*. Receives hourly entry/exit snapshots from a Raspberry Pi, stores them in KV, and serves a live dashboard — accessible from anywhere without exposing the Pi to the internet.
+Cloudflare Worker backend for [driveway-counter](https://github.com/natonet-labs/driveway-counter). Receives hourly entry/exit snapshots from a Raspberry Pi, stores them in KV, and serves a live dashboard — accessible from anywhere without exposing the Pi to the internet.
 
 ---
 
@@ -124,8 +124,6 @@ driveway-metrics/
 ├── src/
 │   ├── index.ts        # Worker — API routes, KV reads/writes, caching
 │   └── index.html      # Dashboard UI (Chart.js, served as static asset)
-├── public/
-│   └── index.html      # Wrangler static asset root
 ├── test/
 │   └── index.spec.ts   # Vitest integration tests
 ├── wrangler.jsonc       # Worker config — name, KV binding, compat date
@@ -136,4 +134,4 @@ driveway-metrics/
 
 ## Companion
 
-**driveway-counter** *(private)* — the Pi-side application that performs YOLOv8m inference on a Hailo-8 NPU, counts driveway entries/exits, and POSTs hourly snapshots to this Worker.
+**[driveway-counter](https://github.com/natonet-labs/driveway-counter)** — the Pi-side application that performs YOLOv8m inference on a Hailo-8 NPU, counts driveway entries/exits, and POSTs hourly snapshots to this Worker.

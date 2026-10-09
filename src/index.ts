@@ -22,6 +22,7 @@
 
 export interface Env {
   DRIVEWAY_METRICS: KVNamespace;
+  CLOUDFLARE_TOKEN: string; // Worker secret shared with the Pi (wrangler secret put)
 }
 
 const corsHeaders = {
@@ -66,6 +67,20 @@ async function cachedResponse(
 }
 
 // ---------------------------------------------------------------------------
+// isAuthorized — constant-time compare of the Bearer token against the secret
+// Fails closed if the CLOUDFLARE_TOKEN secret is not configured.
+// ---------------------------------------------------------------------------
+function isAuthorized(request: Request, env: Env): boolean {
+  const header = request.headers.get('Authorization') ?? '';
+  if (!env.CLOUDFLARE_TOKEN || !header.startsWith('Bearer ')) return false;
+  const encoder = new TextEncoder();
+  const given = encoder.encode(header.slice('Bearer '.length));
+  const expected = encoder.encode(env.CLOUDFLARE_TOKEN);
+  if (given.byteLength !== expected.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(given, expected);
+}
+
+// ---------------------------------------------------------------------------
 // invalidateCaches — called after every Pi write so next load is fresh
 // Costs 2 deletes (free tier: deletes count as writes, but 24/day is trivial)
 // ---------------------------------------------------------------------------
@@ -86,7 +101,7 @@ async function computeHourly(
 ): Promise<{ date: string; snapshots: { hour: number; entries: number; exits: number }[] }> {
   const list = await env.DRIVEWAY_METRICS.list({ prefix: `hourly:${date}:` });
   const snapshots = await Promise.all(
-    list.keys.map(async (k: KVNamespaceListKey) => {
+    list.keys.map(async (k: KVNamespaceListKey<unknown>) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
       return {
         hour: v?.hour ?? parseInt(k.name.split(':')[3], 10),
@@ -112,7 +127,7 @@ async function computeDashboard(
   const list = await env.DRIVEWAY_METRICS.list({ prefix: 'driveway:' });
   const keys = list.keys.slice(-30);
   const metrics = await Promise.all(
-    keys.map(async (k: KVNamespaceListKey) => {
+    keys.map(async (k: KVNamespaceListKey<unknown>) => {
       const v: any = await env.DRIVEWAY_METRICS.get(k.name, { type: 'json' });
       return {
         date: k.name.split(':')[1],
@@ -142,8 +157,7 @@ export default {
     // Writes: 1 conditional daily key + 1 hourly key + 2 cache deletes
     // ------------------------------------------------------------------
     if (request.method === 'POST' && url.pathname === '/api/metrics') {
-      const token = request.headers.get('Authorization')?.replace('Bearer ', '');
-      if (!token) {
+      if (!isAuthorized(request, env)) {
         return new Response('Unauthorized', { status: 401, headers: corsHeaders });
       }
 
