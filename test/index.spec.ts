@@ -88,6 +88,23 @@ describe('read endpoints', () => {
 		expect(((await afterUpload.json()) as unknown[]).length).toBe(3);
 	});
 
+	it('returns the newest 30 days from /dashboard past KV list()\'s 1,000-key page', async () => {
+		// 1,050 consecutive days: list() pages at 1,000, so without following
+		// the cursor the "last 30" would be days 971–1,000 instead of the newest.
+		const start = Date.UTC(2023, 0, 1);
+		const dates = Array.from({ length: 1050 }, (_, i) => new Date(start + i * 86_400_000).toISOString().slice(0, 10));
+		await Promise.all(
+			dates.map((date, i) =>
+				testEnv.DRIVEWAY_METRICS.put(`driveway:${date}`, JSON.stringify({ date, entries: i, exits: i })),
+			),
+		);
+
+		const body = (await (await get('/dashboard')).json()) as { date: string }[];
+		expect(body).toHaveLength(30);
+		expect(body[0].date).toBe(dates[dates.length - 1]); // newest first
+		expect(body[29].date).toBe(dates[dates.length - 30]);
+	});
+
 	it.each(['/today', '/hourly', '/dashboard'])('rejects %s without the dashboard token', async (path) => {
 		expect((await get(path, null)).status).toBe(401);
 		expect((await get(path, 'wrong')).status).toBe(401);
